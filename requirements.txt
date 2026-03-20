@@ -4,3 +4,4 @@ pandas>=1.5
 folium>=0.14
 streamlit-folium>=0.15
 geopy>=2.3
+openpyxl
