@@ -4,86 +4,94 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 from geopy.distance import geodesic
-import time
-import base64
+import math
 
 # Page config
 st.set_page_config(
-    page_title="Campus GPS Navigation",
+    page_title="Campus Navigation",
     page_icon="🗺️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for GPS page only
+# Custom CSS
 st.markdown("""
 <style>
-    .gps-container {
-        max-width: 500px;
-        margin: 50px auto;
-        padding: 40px;
-        background: white;
-        border-radius: 20px;
-        box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+    .main-header {
         text-align: center;
-    }
-    
-    .gps-icon {
-        font-size: 64px;
+        padding: 20px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 15px;
         margin-bottom: 20px;
     }
     
-    .gps-title {
-        font-size: 28px;
-        font-weight: 600;
-        color: #1a1a1a;
-        margin-bottom: 10px;
+    .gps-container {
+        max-width: 450px;
+        margin: 80px auto;
+        padding: 40px;
+        background: white;
+        border-radius: 25px;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.15);
+        text-align: center;
     }
     
-    .gps-subtitle {
-        color: #666;
-        margin-bottom: 30px;
-    }
-    
-    .stButton > button {
-        width: 100%;
-        margin: 5px 0;
-    }
-    
-    .manual-section {
-        margin-top: 20px;
-        padding: 20px;
-        background: #f8f9fa;
-        border-radius: 10px;
-    }
-    
-    .voice-direction {
-        background: #f0f7ff;
-        padding: 15px;
-        border-radius: 10px;
-        margin: 10px 0;
-        border-left: 4px solid #2196F3;
-        animation: slideIn 0.3s ease;
-    }
-    
-    @keyframes slideIn {
-        from {
-            transform: translateX(-20px);
-            opacity: 0;
-        }
-        to {
-            transform: translateX(0);
-            opacity: 1;
-        }
-    }
-    
-    .time-badge {
+    .next-turn-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
-        padding: 10px 20px;
-        border-radius: 30px;
-        display: inline-block;
-        font-weight: bold;
+        padding: 25px;
+        border-radius: 20px;
+        text-align: center;
+        margin: 15px 0;
+    }
+    
+    .next-turn-card h1 {
+        font-size: 48px;
         margin: 10px 0;
+    }
+    
+    .direction-item {
+        padding: 12px 15px;
+        margin: 8px 0;
+        background: #f8f9fa;
+        border-radius: 12px;
+        border-left: 4px solid #4CAF50;
+    }
+    
+    .direction-item.completed {
+        opacity: 0.5;
+        border-left-color: #6c757d;
+        text-decoration: line-through;
+    }
+    
+    .direction-item.current {
+        background: #e3f2fd;
+        border-left-color: #2196F3;
+        font-weight: 600;
+    }
+    
+    .progress-bar {
+        background: #e0e0e0;
+        border-radius: 10px;
+        height: 8px;
+        margin: 15px 0;
+        overflow: hidden;
+    }
+    
+    .progress-fill {
+        background: linear-gradient(90deg, #4CAF50, #2196F3);
+        height: 100%;
+        transition: width 0.5s ease;
+    }
+    
+    .entrance-badge {
+        background: #ff9800;
+        color: white;
+        padding: 5px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: bold;
+        display: inline-block;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -111,316 +119,243 @@ nodes, edges = load_data()
 G = nx.Graph()
 
 for _, row in nodes.iterrows():
-    G.add_node(
-        row["Id"],
-        name=row["Name"],
-        pos=(row["Latitude"], row["Longitude"])
-    )
+    G.add_node(row["Id"], name=row["Name"], pos=(row["Latitude"], row["Longitude"]))
 
 for _, row in edges.iterrows():
-    G.add_edge(
-        row["From"],
-        row["To"],
-        weight=row["Distance_m"]
-    )
+    G.add_edge(row["From"], row["To"], weight=row["Distance_m"])
 
 # Create mappings
 name_to_id = {row["Name"].strip(): row["Id"] for _, row in nodes.iterrows()}
 id_to_name = {row["Id"]: row["Name"].strip() for _, row in nodes.iterrows()}
 
-# Initialize session state
-if "current_lat" not in st.session_state:
-    st.session_state["current_lat"] = nodes["Latitude"].mean()
-    st.session_state["current_lon"] = nodes["Longitude"].mean()
-    st.session_state["gps_accuracy"] = None
-    st.session_state["gps_locked"] = False
-    st.session_state["destination"] = None
-    st.session_state["path"] = None
-    st.session_state["tracking"] = False
-    st.session_state["show_gps"] = True
-    st.session_state["show_manual"] = False
-    st.session_state["voice_enabled"] = True
+# Entrance IDs (gates where people enter campus)
+ENTRANCE_IDS = [2, 16, 30, 33]  # Entrance 3, Entrance 4, Main entrance 1, Entrance 2
+ENTRANCE_NAMES = {2: "Entrance 3", 16: "Entrance 4", 30: "Main Entrance 1", 33: "Entrance 2"}
+
+# Define actual campus bounds using node coordinates (no widening)
+# This ensures only actual campus points are considered "on campus"
+CAMPUS_MIN_LAT = nodes["Latitude"].min()
+CAMPUS_MAX_LAT = nodes["Latitude"].max()
+CAMPUS_MIN_LON = nodes["Longitude"].min()
+CAMPUS_MAX_LON = nodes["Longitude"].max()
+
+# For visual boundary only - use actual building extremes with small padding for visual
+VISUAL_BOUNDS = {
+    "min_lat": CAMPUS_MIN_LAT - 0.0005,
+    "max_lat": CAMPUS_MAX_LAT + 0.0005,
+    "min_lon": CAMPUS_MIN_LON - 0.0005,
+    "max_lon": CAMPUS_MAX_LON + 0.0005
+}
 
 # ----------------------------
 # Helper Functions
 # ----------------------------
-def get_direction_instruction(from_node, to_node, distance):
-    """Generate a natural language direction"""
-    from_name = id_to_name[from_node]
-    to_name = id_to_name[to_node]
-    
-    # Get coordinates to determine general direction
+def get_bearing(lat1, lon1, lat2, lon2):
+    lat1, lat2 = math.radians(lat1), math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    x = math.sin(dlon) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    bearing = math.degrees(math.atan2(x, y))
+    return (bearing + 360) % 360
+
+def get_direction(bearing):
+    directions = ["North", "Northeast", "East", "Southeast", "South", "Southwest", "West", "Northwest"]
+    idx = round(bearing / 45) % 8
+    return directions[idx]
+
+def find_nearest_node(lat, lon):
+    min_dist = float('inf')
+    nearest = None
+    for _, row in nodes.iterrows():
+        dist = geodesic((lat, lon), (row["Latitude"], row["Longitude"])).meters
+        if dist < min_dist:
+            min_dist = dist
+            nearest = row["Id"]
+    return nearest, min_dist
+
+def find_nearest_entrance(lat, lon):
+    """Find the nearest campus entrance from current location"""
+    min_dist = float('inf')
+    nearest = None
+    nearest_name = None
+    for ent_id in ENTRANCE_IDS:
+        row = nodes[nodes["Id"] == ent_id].iloc[0]
+        dist = geodesic((lat, lon), (row["Latitude"], row["Longitude"])).meters
+        if dist < min_dist:
+            min_dist = dist
+            nearest = ent_id
+            nearest_name = row["Name"]
+    return nearest, min_dist, nearest_name
+
+def is_on_campus(lat, lon):
+    """Check if user is within 50 meters of any campus node (actual campus)"""
+    for _, row in nodes.iterrows():
+        dist = geodesic((lat, lon), (row["Latitude"], row["Longitude"])).meters
+        if dist < 50:  # Within 50 meters of any campus building/path
+            return True
+    return False
+
+def get_direct_instruction(from_lat, from_lon, to_lat, to_lon, to_name):
+    """Generate instruction for direct walking (outside campus)"""
+    bearing = get_bearing(from_lat, from_lon, to_lat, to_lon)
+    direction = get_direction(bearing)
+    dist = geodesic((from_lat, from_lon), (to_lat, to_lon)).meters
+    return f"Walk {direction} for {dist:.0f} meters to {to_name}", direction, dist
+
+def get_route_instruction(from_node, to_node):
+    """Generate instruction for internal campus path"""
     from_row = nodes[nodes["Id"] == from_node].iloc[0]
     to_row = nodes[nodes["Id"] == to_node].iloc[0]
-    
-    # Simple direction logic based on coordinate differences
-    lat_diff = to_row["Latitude"] - from_row["Latitude"]
-    lon_diff = to_row["Longitude"] - from_row["Longitude"]
-    
-    if abs(lat_diff) > abs(lon_diff):
-        direction = "north" if lat_diff > 0 else "south"
-    else:
-        direction = "east" if lon_diff > 0 else "west"
-    
-    return f"Walk {direction} for {distance:.0f} meters to {to_name}"
+    bearing = get_bearing(from_row["Latitude"], from_row["Longitude"],
+                          to_row["Latitude"], to_row["Longitude"])
+    direction = get_direction(bearing)
+    dist = G[from_node][to_node]["weight"]
+    return f"Head {direction} for {dist:.0f} meters to {id_to_name[to_node]}", direction, dist
 
-def text_to_speech(text):
-    """Convert text to speech using browser's speech synthesis"""
-    audio_html = f"""
+def format_time(seconds):
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        return f"{seconds/60:.1f}min"
+    else:
+        return f"{seconds/3600:.1f}h"
+
+def speak(text):
+    speech_html = f"""
     <script>
-        var msg = new SpeechSynthesisUtterance();
-        msg.text = "{text}";
-        msg.rate = 0.9;
-        msg.pitch = 1;
-        window.speechSynthesis.cancel(); // Stop any ongoing speech
-        window.speechSynthesis.speak(msg);
+    var utterance = new SpeechSynthesisUtterance("{text}");
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
     </script>
     """
-    return audio_html
-
-def format_walking_time(distance_meters):
-    """Convert distance to walking time"""
-    avg_walking_speed = 1.4  # meters per second
-    time_seconds = distance_meters / avg_walking_speed
-    
-    if time_seconds < 60:
-        return f"{time_seconds:.0f} seconds"
-    elif time_seconds < 3600:
-        minutes = time_seconds / 60
-        return f"{minutes:.1f} minutes"
-    else:
-        hours = time_seconds / 3600
-        return f"{hours:.1f} hours"
+    st.components.v1.html(speech_html, height=0)
 
 # ----------------------------
-# GPS Page with Auto-redirect
+# Initialize Session State
 # ----------------------------
-if st.session_state["show_gps"] and not st.session_state["gps_locked"]:
+if "current_lat" not in st.session_state:
+    st.session_state.current_lat = None
+    st.session_state.current_lon = None
+    st.session_state.gps_accuracy = None
+    st.session_state.gps_locked = False
+    st.session_state.show_gps = True
+    st.session_state.destination = None
+    st.session_state.full_path = None
+    st.session_state.full_instructions = []
+    st.session_state.full_coords = []
+    st.session_state.tracking = False
+    st.session_state.current_step = 0
+    st.session_state.completed_steps = []
+    st.session_state.last_spoken = None
+    st.session_state.voice_enabled = True
+    st.session_state.total_distance = 0
+    st.session_state.nearest_entrance = None
+    st.session_state.dist_to_entrance = 0
+
+# ----------------------------
+# GPS Location Page
+# ----------------------------
+if st.session_state.show_gps and not st.session_state.gps_locked:
     
-    # Center the GPS container
     col1, col2, col3 = st.columns([1, 2, 1])
     
     with col2:
         st.markdown("""
         <div class="gps-container">
             <div class="gps-icon">📍</div>
-            <div class="gps-title">Location Required</div>
-            <div class="gps-subtitle">We need your location for accurate campus navigation</div>
+            <h2>Campus Navigation</h2>
+            <p>Allow location access to start navigating from anywhere</p>
         </div>
         """, unsafe_allow_html=True)
         
-        # GPS button using JavaScript with URL redirect
         gps_html = """
         <div style="text-align: center;">
             <button onclick="getLocation()" style="
                 background: #4CAF50;
                 color: white;
                 border: none;
-                padding: 15px 30px;
-                border-radius: 10px;
-                font-size: 16px;
-                font-weight: 600;
+                padding: 16px 32px;
+                border-radius: 50px;
+                font-size: 18px;
+                font-weight: bold;
                 cursor: pointer;
                 width: 100%;
-                margin: 10px 0;
-                transition: all 0.3s;
+                box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
             ">
-                🎯 Get My Location
+                📍 Get My Location
             </button>
-            
-            <button onclick="showManual()" style="
-                background: #2196F3;
-                color: white;
-                border: none;
-                padding: 15px 30px;
-                border-radius: 10px;
-                font-size: 16px;
-                font-weight: 600;
-                cursor: pointer;
-                width: 100%;
-                margin: 10px 0;
-                transition: all 0.3s;
-            ">
-                ✏️ Enter Coordinates Manually
-            </button>
-            
-            <div id="manual-section" style="display: none; margin-top: 20px;">
-                <input type="text" id="lat-input" placeholder="Latitude (e.g., 6.69152)" style="
-                    width: 100%;
-                    padding: 12px;
-                    margin: 5px 0;
-                    border: 2px solid #ddd;
-                    border-radius: 8px;
-                    font-size: 14px;
-                ">
-                <input type="text" id="lon-input" placeholder="Longitude (e.g., -1.60957)" style="
-                    width: 100%;
-                    padding: 12px;
-                    margin: 5px 0;
-                    border: 2px solid #ddd;
-                    border-radius: 8px;
-                    font-size: 14px;
-                ">
-                <button onclick="submitManual()" style="
-                    background: #4CAF50;
-                    color: white;
-                    border: none;
-                    padding: 12px;
-                    border-radius: 8px;
-                    font-size: 16px;
-                    cursor: pointer;
-                    width: 100%;
-                    margin-top: 10px;
-                ">
-                    Submit Coordinates
-                </button>
-            </div>
-            
-            <div id="status" style="
-                margin-top: 20px;
-                padding: 15px;
-                border-radius: 8px;
-                display: none;
-                font-weight: 500;
-            "></div>
+            <div id="gps-status" style="margin-top: 20px; padding: 12px; border-radius: 10px; display: none;"></div>
         </div>
         
         <script>
-        function showStatus(message, isError) {
-            const status = document.getElementById('status');
-            status.style.display = 'block';
-            status.style.background = isError ? '#ffebee' : '#e8f5e8';
-            status.style.color = isError ? '#c62828' : '#2e7d32';
-            status.innerHTML = message;
+        function showStatus(msg, isError) {
+            const div = document.getElementById('gps-status');
+            div.style.display = 'block';
+            div.style.background = isError ? '#ffebee' : '#e8f5e8';
+            div.style.color = isError ? '#c62828' : '#2e7d32';
+            div.innerHTML = msg;
         }
         
         function getLocation() {
-            showStatus('🛰️ Requesting GPS...', false);
+            showStatus('🛰️ Getting your location...', false);
             
             if (!navigator.geolocation) {
-                showStatus('❌ GPS is not supported by your browser', true);
+                showStatus('❌ GPS not supported', true);
                 return;
             }
             
             navigator.geolocation.getCurrentPosition(
-                (position) => {
-                    const lat = position.coords.latitude;
-                    const lon = position.coords.longitude;
-                    const acc = position.coords.accuracy;
-                    
-                    showStatus(`✅ GPS locked! Accuracy: ${acc.toFixed(1)}m`, false);
-                    
-                    // Auto-redirect to map page with coordinates
+                (pos) => {
+                    showStatus('✅ Location acquired!', false);
                     setTimeout(() => {
                         window.location.href = window.location.pathname + 
-                            '?lat=' + lat + 
-                            '&lon=' + lon + 
-                            '&acc=' + acc +
-                            '&gps=success';
-                    }, 1500);
+                            '?lat=' + pos.coords.latitude + 
+                            '&lon=' + pos.coords.longitude + 
+                            '&acc=' + pos.coords.accuracy;
+                    }, 800);
                 },
-                (error) => {
+                (err) => {
                     let msg = '❌ ';
-                    if (error.code === 1) {
-                        msg += 'Please allow location access in your browser';
-                    } else if (error.code === 2) {
-                        msg += 'GPS unavailable. Try going outside';
-                    } else if (error.code === 3) {
-                        msg += 'GPS timeout. Please try again';
-                    } else {
-                        msg += 'GPS error: ' + error.message;
-                    }
+                    if (err.code === 1) msg += 'Please allow location access';
+                    else if (err.code === 2) msg += 'GPS unavailable';
+                    else msg += 'GPS error';
                     showStatus(msg, true);
                 },
-                {
-                    enableHighAccuracy: true,
-                    timeout: 10000,
-                    maximumAge: 0
-                }
+                { enableHighAccuracy: true, timeout: 15000 }
             );
-        }
-        
-        function showManual() {
-            document.getElementById('manual-section').style.display = 'block';
-        }
-        
-        function submitManual() {
-            const lat = document.getElementById('lat-input').value;
-            const lon = document.getElementById('lon-input').value;
-            
-            if (!lat || !lon) {
-                showStatus('❌ Please enter both coordinates', true);
-                return;
-            }
-            
-            const latNum = parseFloat(lat);
-            const lonNum = parseFloat(lon);
-            
-            if (isNaN(latNum) || isNaN(lonNum)) {
-                showStatus('❌ Please enter valid numbers', true);
-                return;
-            }
-            
-            showStatus('✅ Manual location set! Redirecting...', false);
-            
-            // Auto-redirect with manual coordinates
-            setTimeout(() => {
-                window.location.href = window.location.pathname + 
-                    '?lat=' + latNum + 
-                    '&lon=' + lonNum + 
-                    '&acc=5' +
-                    '&manual=success';
-            }, 1500);
         }
         </script>
         """
         
-        st.components.v1.html(gps_html, height=500)
+        st.components.v1.html(gps_html, height=300)
         
-        # Check URL parameters for GPS data
-        query_params = st.query_params if hasattr(st, 'query_params') else {}
-        
-        # Check for GPS success
-        if 'gps' in query_params and query_params['gps'] == 'success':
-            try:
-                st.session_state["current_lat"] = float(query_params['lat'])
-                st.session_state["current_lon"] = float(query_params['lon'])
-                st.session_state["gps_accuracy"] = float(query_params.get('acc', [10])[0])
-                st.session_state["gps_locked"] = True
-                st.session_state["show_gps"] = False
-                # Clear URL parameters
-                if hasattr(st, 'query_params'):
-                    st.query_params.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error processing GPS data: {e}")
-        
-        # Check for manual success
-        if 'manual' in query_params and query_params['manual'] == 'success':
-            try:
-                st.session_state["current_lat"] = float(query_params['lat'])
-                st.session_state["current_lon"] = float(query_params['lon'])
-                st.session_state["gps_accuracy"] = float(query_params.get('acc', [5])[0])
-                st.session_state["gps_locked"] = True
-                st.session_state["show_gps"] = False
-                if hasattr(st, 'query_params'):
-                    st.query_params.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error processing manual coordinates: {e}")
+        query_params = st.query_params
+        if 'lat' in query_params and 'lon' in query_params:
+            st.session_state.current_lat = float(query_params['lat'])
+            st.session_state.current_lon = float(query_params['lon'])
+            st.session_state.gps_accuracy = float(query_params.get('acc', [10])[0])
+            st.session_state.gps_locked = True
+            st.session_state.show_gps = False
+            st.query_params.clear()
+            st.rerun()
 
+# ----------------------------
+# Main Navigation Screen
+# ----------------------------
 else:
-    # ----------------------------
-    # Main Navigation UI with Voice & Walking Time
-    # ----------------------------
-    st.title("📍 Campus Navigation System")
     
-    # Settings row
+    st.markdown('<div class="main-header"><h1>📍 Campus Navigation</h1><p>From anywhere to your destination • Live GPS • Voice Guidance</p></div>', unsafe_allow_html=True)
+    
+    # Location Status - ACCURATE DETECTION
+    on_campus = is_on_campus(st.session_state.current_lat, st.session_state.current_lon)
+    
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if st.session_state["gps_accuracy"]:
-            acc = st.session_state["gps_accuracy"]
+        if st.session_state.gps_accuracy:
+            acc = st.session_state.gps_accuracy
             if acc < 10:
                 st.success(f"🟢 GPS: {acc:.0f}m")
             elif acc < 30:
@@ -429,142 +364,148 @@ else:
                 st.error(f"🔴 GPS: {acc:.0f}m")
     
     with col2:
-        source = "GPS" if st.session_state.get("gps_accuracy", 0) < 50 else "Manual"
-        st.info(f"📍 {source}")
+        if on_campus:
+            st.success("✅ ON CAMPUS")
+        else:
+            st.warning("📍 OFF CAMPUS - Navigation will guide you to campus")
     
     with col3:
-        # Voice toggle
-        voice_enabled = st.toggle("🔊 Voice Guidance", value=st.session_state.get("voice_enabled", True))
-        st.session_state["voice_enabled"] = voice_enabled
+        st.session_state.voice_enabled = st.toggle("🔊 Voice", value=st.session_state.voice_enabled)
     
     with col4:
-        if st.button("🔄 New Location", use_container_width=True):
-            st.session_state["show_gps"] = True
-            st.session_state["gps_locked"] = False
+        if st.button("📍 New Location", use_container_width=True):
+            st.session_state.show_gps = True
+            st.session_state.gps_locked = False
+            st.session_state.tracking = False
             st.rerun()
     
-    # Check if on campus
-    campus_bounds = {
-        "min_lat": nodes["Latitude"].min() - 0.001,
-        "max_lat": nodes["Latitude"].max() + 0.001,
-        "min_lon": nodes["Longitude"].min() - 0.001,
-        "max_lon": nodes["Longitude"].max() + 0.001
-    }
+    st.markdown("---")
     
-    on_campus = (
-        campus_bounds["min_lat"] <= st.session_state["current_lat"] <= campus_bounds["max_lat"] and
-        campus_bounds["min_lon"] <= st.session_state["current_lon"] <= campus_bounds["max_lon"]
-    )
+    # Destination Selection
+    col_left, col_right = st.columns([1, 2])
     
-    if on_campus:
-        st.success("✅ You are on campus")
-    else:
-        st.warning("⚠️ You are off campus - navigation may not be accurate")
-    
-    # Main navigation columns
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
+    with col_left:
         st.markdown("### 🎯 Destination")
         buildings = sorted(nodes["Name"].str.strip().tolist())
-        dest = st.selectbox("Select destination", buildings)
+        selected_dest = st.selectbox("Where do you want to go?", buildings, label_visibility="collapsed")
         
-        if st.button("🚀 Find Route", type="primary", use_container_width=True):
-            st.session_state["destination"] = name_to_id[dest]
+        if st.button("🚀 Start Navigation", type="primary", use_container_width=True):
+            dest_id = name_to_id[selected_dest]
+            st.session_state.destination = dest_id
             
-            # Find nearest node
-            min_dist = float('inf')
-            nearest = None
-            for _, row in nodes.iterrows():
-                dist = geodesic(
-                    (st.session_state["current_lat"], st.session_state["current_lon"]),
-                    (row["Latitude"], row["Longitude"])
-                ).meters
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest = row["Id"]
+            # Clear previous
+            st.session_state.full_path = []
+            st.session_state.full_instructions = []
+            st.session_state.full_coords = []
             
-            st.session_state["current_node"] = nearest
+            # Find nearest entrance
+            entrance_id, dist_to_entrance, entrance_name = find_nearest_entrance(
+                st.session_state.current_lat, 
+                st.session_state.current_lon
+            )
+            st.session_state.nearest_entrance = entrance_id
+            st.session_state.dist_to_entrance = dist_to_entrance
             
+            # Get path from entrance to destination
             try:
-                path = nx.shortest_path(G, nearest, st.session_state["destination"], weight="weight")
-                distance = nx.shortest_path_length(G, nearest, st.session_state["destination"], weight="weight")
+                campus_path = nx.shortest_path(G, entrance_id, dest_id, weight="weight")
+                campus_distance = nx.shortest_path_length(G, entrance_id, dest_id, weight="weight")
                 
-                st.session_state["path"] = path
-                st.session_state["total_distance"] = distance
-                st.session_state["tracking"] = True
-                st.success(f"✅ Route found!")
+                # Store direct walking segment (user location -> entrance)
+                entrance_coords = nodes[nodes["Id"] == entrance_id].iloc[0]
+                st.session_state.full_path.append({
+                    "type": "direct",
+                    "from_lat": st.session_state.current_lat,
+                    "from_lon": st.session_state.current_lon,
+                    "to_lat": entrance_coords["Latitude"],
+                    "to_lon": entrance_coords["Longitude"],
+                    "to_name": entrance_name,
+                    "distance": dist_to_entrance
+                })
+                
+                # Store campus path
+                for i in range(len(campus_path) - 1):
+                    st.session_state.full_path.append({
+                        "type": "campus",
+                        "from_node": campus_path[i],
+                        "to_node": campus_path[i + 1],
+                        "distance": G[campus_path[i]][campus_path[i + 1]]["weight"]
+                    })
+                
+                # Generate all instructions
+                # Instruction 1: From user location to entrance
+                inst, dir_text, d = get_direct_instruction(
+                    st.session_state.current_lat, st.session_state.current_lon,
+                    entrance_coords["Latitude"], entrance_coords["Longitude"],
+                    entrance_name
+                )
+                st.session_state.full_instructions.append({
+                    "text": inst,
+                    "direction": dir_text,
+                    "distance": d,
+                    "target": entrance_name,
+                    "type": "direct"
+                })
+                
+                # Instructions for campus path
+                for i in range(len(campus_path) - 1):
+                    inst, dir_text, d = get_route_instruction(campus_path[i], campus_path[i + 1])
+                    st.session_state.full_instructions.append({
+                        "text": inst,
+                        "direction": dir_text,
+                        "distance": d,
+                        "target": id_to_name[campus_path[i + 1]],
+                        "type": "campus"
+                    })
+                
+                # Generate all coordinates for map
+                # Add user location
+                st.session_state.full_coords.append([st.session_state.current_lat, st.session_state.current_lon])
+                # Add entrance
+                st.session_state.full_coords.append([entrance_coords["Latitude"], entrance_coords["Longitude"]])
+                # Add all campus path coordinates
+                for node_id in campus_path:
+                    row = nodes[nodes["Id"] == node_id].iloc[0]
+                    st.session_state.full_coords.append([row["Latitude"], row["Longitude"]])
+                
+                st.session_state.total_distance = dist_to_entrance + campus_distance
+                st.session_state.tracking = True
+                st.session_state.current_step = 0
+                st.session_state.completed_steps = []
+                
+                if not on_campus:
+                    st.success(f"📍 {dist_to_entrance:.0f}m to {entrance_name} entrance, then {campus_distance:.0f}m to your destination")
+                else:
+                    st.success(f"✅ Route found! {campus_distance:.0f}m to destination")
+                    
+            except Exception as e:
+                st.error(f"Cannot find route: {e}")
+            
+            st.rerun()
+        
+        # Show route summary if navigating
+        if st.session_state.tracking and st.session_state.full_instructions:
+            st.markdown("---")
+            st.metric("Total Distance", f"{st.session_state.total_distance:.0f} m")
+            st.metric("Est. Walking Time", format_time(st.session_state.total_distance / 1.4))
+            
+            if st.button("🛑 Stop Navigation", use_container_width=True):
+                st.session_state.tracking = False
                 st.rerun()
-            except nx.NetworkXNoPath:
-                st.error("❌ No path found to destination!")
-        
-        if st.session_state.get("tracking") and st.session_state.get("path"):
-            if st.button("🛑 Clear Route", use_container_width=True):
-                st.session_state["tracking"] = False
-                st.session_state["path"] = None
-                st.rerun()
-        
-        # Show distance and walking time
-        if st.session_state.get("total_distance"):
-            distance = st.session_state["total_distance"]
-            walking_time = format_walking_time(distance)
-            
-            st.markdown(f"""
-            <div class="time-badge">
-                📏 Distance: {distance:.0f}m
-            </div>
-            <div class="time-badge" style="background: linear-gradient(135deg, #ff6b6b 0%, #ff8e8e 100%);">
-                ⏱️ Walking: {walking_time}
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Voice directions
-        if st.session_state.get("tracking") and st.session_state.get("path") and st.session_state["voice_enabled"]:
-            st.markdown("### 🗣️ Voice Directions")
-            
-            path = st.session_state["path"]
-            
-            # Generate all directions
-            directions_text = []
-            for i in range(len(path) - 1):
-                from_node = path[i]
-                to_node = path[i + 1]
-                segment_dist = G[from_node][to_node]["weight"]
-                
-                direction = get_direction_instruction(from_node, to_node, segment_dist)
-                directions_text.append(direction)
-                
-                st.markdown(f"""
-                <div class="voice-direction">
-                    <b>Step {i+1}:</b> {direction}
-                </div>
-                """, unsafe_allow_html=True)
-            
-            # Play all directions as audio (one after another with delay)
-            if st.button("🔊 Play All Directions"):
-                full_text = ". ".join(directions_text)
-                st.components.v1.html(text_to_speech(full_text), height=0)
     
-    with col2:
-        st.markdown("### 🗺️ Map")
-        
+    with col_right:
         # Create map
-        m = folium.Map(
-            location=[st.session_state["current_lat"], st.session_state["current_lon"]],
-            zoom_start=18
-        )
+        map_center = [st.session_state.current_lat, st.session_state.current_lon]
+        m = folium.Map(location=map_center, zoom_start=16, control_scale=True)
         
-        # Add buildings
+        # Add all buildings as markers
         for _, row in nodes.iterrows():
-            if st.session_state.get("destination") == row["Id"]:
-                color = "red"
-                icon = "flag"
-            elif st.session_state.get("path") and row["Id"] in st.session_state["path"]:
-                color = "blue"
-                icon = "circle"
+            if st.session_state.destination == row["Id"]:
+                color, icon = "red", "flag"
+            elif st.session_state.full_instructions and row["Id"] in [seg.get("to_node") for seg in st.session_state.full_path if seg.get("type") == "campus"]:
+                color, icon = "blue", "circle"
             else:
-                color = "gray"
-                icon = "info-sign"
+                color, icon = "gray", "info-sign"
             
             folium.Marker(
                 [row["Latitude"], row["Longitude"]],
@@ -572,63 +513,131 @@ else:
                 icon=folium.Icon(color=color, icon=icon)
             ).add_to(m)
         
-        # Draw route with segment distances
-        if st.session_state.get("path"):
-            route_coords = []
-            for i in range(len(st.session_state["path"]) - 1):
-                from_node = st.session_state["path"][i]
-                to_node = st.session_state["path"][i + 1]
-                
-                from_row = nodes[nodes["Id"] == from_node].iloc[0]
-                to_row = nodes[nodes["Id"] == to_node].iloc[0]
-                
-                route_coords.append([from_row["Latitude"], from_row["Longitude"]])
-                route_coords.append([to_row["Latitude"], to_row["Longitude"]])
-                
-                # Add distance label mid-way
-                mid_lat = (from_row["Latitude"] + to_row["Latitude"]) / 2
-                mid_lon = (from_row["Longitude"] + to_row["Longitude"]) / 2
-                
-                segment_dist = G[from_node][to_node]["weight"]
-                
-                folium.Marker(
-                    [mid_lat, mid_lon],
-                    popup=f"{segment_dist:.0f}m",
-                    icon=folium.DivIcon(html=f'<div style="font-size: 12pt; font-weight: bold;">{segment_dist:.0f}m</div>')
-                ).add_to(m)
-            
-            # Draw the route line
+        # Draw full route (from user location to destination)
+        if st.session_state.full_coords:
             folium.PolyLine(
-                route_coords,
-                color="blue",
-                weight=4,
-                opacity=0.8
+                st.session_state.full_coords,
+                color="blue", weight=5, opacity=0.8,
+                popup=f"Full route: {st.session_state.total_distance:.0f}m"
             ).add_to(m)
+            
+            # Mark entrance with special marker
+            if st.session_state.nearest_entrance:
+                ent_row = nodes[nodes["Id"] == st.session_state.nearest_entrance].iloc[0]
+                folium.Marker(
+                    [ent_row["Latitude"], ent_row["Longitude"]],
+                    popup=f"🚪 {ent_row['Name']} (Campus Entrance)",
+                    icon=folium.Icon(color="orange", icon="door-open", prefix="fa")
+                ).add_to(m)
         
         # Current location
         folium.Marker(
-            [st.session_state["current_lat"], st.session_state["current_lon"]],
+            [st.session_state.current_lat, st.session_state.current_lon],
             popup="You are here",
             icon=folium.Icon(color="green", icon="location-dot", prefix="fa")
         ).add_to(m)
         
         # Accuracy circle
-        if st.session_state.get("gps_accuracy"):
+        if st.session_state.gps_accuracy:
             folium.Circle(
-                [st.session_state["current_lat"], st.session_state["current_lon"]],
-                radius=st.session_state["gps_accuracy"],
-                color="green" if st.session_state["gps_accuracy"] < 10 else "orange",
-                fill=True,
-                fillOpacity=0.1
+                [st.session_state.current_lat, st.session_state.current_lon],
+                radius=st.session_state.gps_accuracy,
+                color="green" if st.session_state.gps_accuracy < 10 else "orange",
+                fill=True, fillOpacity=0.1
             ).add_to(m)
         
-        st_folium(m, width=None, height=500)
+        st_folium(m, width=None, height=450)
+    
+    # ----------------------------
+    # Live Turn-by-Turn Navigation
+    # ----------------------------
+    if st.session_state.tracking and st.session_state.full_instructions:
+        
+        st.markdown("---")
+        st.markdown("### 🧭 Live Navigation")
+        
+        # Find current position on route
+        current_node, _ = find_nearest_node(st.session_state.current_lat, st.session_state.current_lon)
+        
+        # Check if destination reached
+        if current_node == st.session_state.destination:
+            st.balloons()
+            st.success("🎉 You have reached your destination!")
+            st.session_state.tracking = False
+            st.rerun()
+        
+        # Determine current step
+        current_idx = st.session_state.current_step
+        
+        # Check if user has moved past current instruction
+        if current_idx < len(st.session_state.full_instructions):
+            inst = st.session_state.full_instructions[current_idx]
+            
+            if inst["type"] == "direct":
+                # For direct segment, check if close to entrance
+                ent_row = nodes[nodes["Id"] == st.session_state.nearest_entrance].iloc[0]
+                dist_to_entrance = geodesic(
+                    (st.session_state.current_lat, st.session_state.current_lon),
+                    (ent_row["Latitude"], ent_row["Longitude"])
+                ).meters
+                if dist_to_entrance < 20:
+                    st.session_state.current_step += 1
+                    st.rerun()
+            else:
+                # For campus path, check if reached the target node
+                for seg in st.session_state.full_path:
+                    if seg.get("type") == "campus" and seg.get("to_node") == current_node:
+                        st.session_state.current_step += 1
+                        st.rerun()
+                        break
+        
+        # Show current instruction
+        if st.session_state.current_step < len(st.session_state.full_instructions):
+            inst = st.session_state.full_instructions[st.session_state.current_step]
+            
+            st.markdown(f"""
+            <div class="next-turn-card">
+                <p style="font-size: 14px; opacity: 0.9;">⬆️ NEXT</p>
+                <h1>{inst['direction']}</h1>
+                <p style="font-size: 20px; font-weight: bold;">{inst['distance']:.0f} m</p>
+                <p style="font-size: 14px;">to {inst['target']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Voice guidance
+            if st.session_state.voice_enabled and st.session_state.last_spoken != inst['text']:
+                st.session_state.last_spoken = inst['text']
+                speak(inst['text'])
+            
+            # Progress
+            total_steps = len(st.session_state.full_instructions)
+            progress = (st.session_state.current_step + 1) / total_steps
+            
+            # Calculate remaining distance
+            remaining_dist = 0
+            for i in range(st.session_state.current_step, len(st.session_state.full_instructions)):
+                remaining_dist += st.session_state.full_instructions[i]['distance']
+            
+            st.markdown(f"""
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: {progress * 100}%;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+                <span>📍 Step {st.session_state.current_step + 1} of {total_steps}</span>
+                <span>⏱️ {format_time(remaining_dist / 1.4)} remaining</span>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # All directions
+        with st.expander("📋 All Directions"):
+            for i, inst in enumerate(st.session_state.full_instructions):
+                if i < st.session_state.current_step:
+                    st.markdown(f'<div class="direction-item completed">✅ {i+1}. {inst["text"]}</div>', unsafe_allow_html=True)
+                elif i == st.session_state.current_step:
+                    st.markdown(f'<div class="direction-item current">📍 {i+1}. {inst["text"]}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="direction-item">➡️ {i+1}. {inst["text"]}</div>', unsafe_allow_html=True)
 
 # Footer
 st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #666; padding: 20px;'>
-    <b>📍 Campus Navigation System</b><br>
-    <small>With Voice Guidance • Real-time GPS • Walking Time Estimates</small>
-</div>
-""", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #666; font-size: 12px;'>📍 From anywhere to anywhere • Live GPS • Turn-by-Turn • Voice Guidance</p>", unsafe_allow_html=True)
